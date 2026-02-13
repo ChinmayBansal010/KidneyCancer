@@ -1,0 +1,4 @@
+from src.tumor_localization.localize_dataset import localize_all
+
+if __name__ == "__main__":
+    localize_all()

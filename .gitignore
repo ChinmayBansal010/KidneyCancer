@@ -1,0 +1,9 @@
+venv
+
+checkpoints
+data
+kits19
+
+KidneyCancerDetection.egg-info
+
+**/__pycache__/*
