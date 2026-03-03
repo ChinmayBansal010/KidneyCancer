@@ -3,6 +3,7 @@ venv
 checkpoints
 data
 kits19
+experiments
 
 KidneyCancerDetection.egg-info
 
