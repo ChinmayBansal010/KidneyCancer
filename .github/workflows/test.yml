@@ -1,0 +1,59 @@
+name: Test Package
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Upgrade packaging tools
+        run: python -m pip install --upgrade pip setuptools wheel build
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Validate package metadata
+        run: |
+          python setup.py --name
+          python setup.py --version
+
+      - name: Compile source tree
+        run: python -m compileall src scripts
+
+      - name: Validate CLI help
+        run: |
+          python -m kidneycancer --help
+          python -m kidneycancer preprocess --help
+          python -m kidneycancer localize-kidneys --help
+          python -m kidneycancer localize-tumors --help
+          python -m kidneycancer extract-patches --help
+          python -m kidneycancer build-2p5d --help
+
+      - name: Validate script help
+        run: |
+          python scripts/train_unet3d.py --help
+          python scripts/train_unetpp.py --help
+          python scripts/train_mil.py --help
+          python scripts/pretrain_ssl.py --help
+          python scripts/infer_unetpp.py --help
+          python scripts/infer_tcga_segmentation.py --help
+          python scripts/infer_tcga_classification.py --help

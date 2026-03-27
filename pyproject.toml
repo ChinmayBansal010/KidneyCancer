@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Kidney cancer detection and radiogenomics pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
 authors = [
   { name = "Chinmay Bansal", email = "chinmay8521@gmail.com" }
 ]
@@ -30,6 +31,7 @@ dependencies = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",

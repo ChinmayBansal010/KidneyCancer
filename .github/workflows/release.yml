@@ -1,8 +1,9 @@
 name: Build Release Assets
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -39,7 +40,7 @@ jobs:
           path: dist/*
 
       - name: Attach distributions to GitHub release
-        if: github.event_name == 'release' || github.event.inputs.tag != ''
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*

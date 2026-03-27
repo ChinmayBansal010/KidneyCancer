@@ -93,3 +93,4 @@ For full setup instructions, data layout expectations, workflow order, and a com
 - The CLI commands are the safest entry point for the main KiTS19 preparation pipeline.
 - Many scripts in `scripts/` are experiment-oriented and use hard-coded paths. Review them before changing data locations.
 - Root-level wrapper scripts such as `scripts/run_preprocessing.py` are kept for convenience, but the package CLI is the preferred interface.
+- The project is licensed under the MIT License.
