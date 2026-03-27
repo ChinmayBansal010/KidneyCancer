@@ -1,80 +1,74 @@
-import torch
+"""Save qualitative boundary overlays for a trained segmentation checkpoint."""
+
 from pathlib import Path
+
+import torch
 from tqdm import tqdm
 
-from src.models.unetpp_3d import UNetPP3D
-from src.datasets.tumor_segmentation_dataset import TumorSegmentationDataset
-from src.metrics import dice_score, iou_score, hd95
-from src.metrics.utils import to_numpy
-from src.utils.visualization import save_boundary_overlay
+from _bootstrap import bootstrap_src_path
+
+bootstrap_src_path()
+
+from kidneycancer.datasets.tumor_segmentation_dataset import TumorSegmentationDataset
+from kidneycancer.metrics import dice_score, hd95, iou_score
+from kidneycancer.metrics.utils import to_numpy
+from kidneycancer.models.unetpp_3d import UNetPP3D
+from kidneycancer.utils.visualization import save_boundary_overlay
 
 
-def run():
+def main() -> None:
+    """Export boundary visualization images and per-case metrics."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    checkpoint_path = Path("experiments/seg_unetpp/checkpoints/epoch_010.pth")
+    checkpoint_name = checkpoint_path.stem
 
-    CKPT_PATH = "experiments/seg_unetpp/checkpoints/epoch_010.pth"
-    CKPT_NAME = Path(CKPT_PATH).stem
-
-    model = UNetPP3D(
-        in_channels=1,
-        num_classes=3,
-        base_ch=16
-    ).to(device)
-
-    model.load_state_dict(
-        torch.load(CKPT_PATH, map_location=device)
-    )
+    model = UNetPP3D(in_channels=1, num_classes=3, base_ch=16).to(device)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    ds = TumorSegmentationDataset(
+    dataset = TumorSegmentationDataset(
         root_dir="data/tumor_roi/kits19",
         mode="val",
-        patch_size=(96, 96, 96)
+        patch_size=(96, 96, 96),
     )
 
-    out_root = Path("experiments/seg_unetpp/qualitative") / CKPT_NAME
-    out_root.mkdir(parents=True, exist_ok=True)
+    output_root = Path("experiments/seg_unetpp/qualitative") / checkpoint_name
+    output_root.mkdir(parents=True, exist_ok=True)
 
     with torch.no_grad():
-        for i in tqdm(range(min(10, len(ds)))):
-            x, y = ds[i]
-            x = x.unsqueeze(0).to(device)
-            y = y.to(device)
+        for index in tqdm(range(min(10, len(dataset)))):
+            inputs, targets = dataset[index]
+            inputs = inputs.unsqueeze(0).to(device)
+            targets = targets.to(device)
 
-            logits = model(x)
-            pred = torch.argmax(logits, dim=1)
+            logits = model(inputs)
+            predictions = torch.argmax(logits, dim=1)
+            dice_value = dice_score(predictions, targets).item()
+            iou_value = iou_score(predictions, targets).item()
+            hd95_value = hd95(to_numpy(predictions[0]), to_numpy(targets))
 
-            dice = dice_score(pred, y).item()
-            iou = iou_score(pred, y).item()
-            hd = hd95(to_numpy(pred[0]), to_numpy(y))
-
-            z = x.shape[2] // 2
-
-            ct_slice = to_numpy(x[0, 0, z])
-            gt_slice = to_numpy(y[z])
-            pred_slice = to_numpy(pred[0, z])
-
-            case_dir = out_root / f"case_{i:05d}"
+            slice_index = inputs.shape[2] // 2
+            case_dir = output_root / f"case_{index:05d}"
             case_dir.mkdir(exist_ok=True)
 
             save_boundary_overlay(
-                ct_slice,
-                gt_slice,
-                pred_slice,
-                dice,
-                iou,
-                hd,
-                case_dir / f"slice_{z:03d}.png"
+                to_numpy(inputs[0, 0, slice_index]),
+                to_numpy(targets[slice_index]),
+                to_numpy(predictions[0, slice_index]),
+                dice_value,
+                iou_value,
+                hd95_value,
+                case_dir / f"slice_{slice_index:03d}.png",
             )
 
-            with open(case_dir / "metrics.txt", "w") as f:
-                f.write(
-                    f"Checkpoint : {CKPT_NAME}\n"
-                    f"Dice       : {dice:.4f}\n"
-                    f"IoU        : {iou:.4f}\n"
-                    f"HD95 (vox) : {hd:.2f}\n"
+            with open(case_dir / "metrics.txt", "w", encoding="utf-8") as handle:
+                handle.write(
+                    f"Checkpoint : {checkpoint_name}\n"
+                    f"Dice       : {dice_value:.4f}\n"
+                    f"IoU        : {iou_value:.4f}\n"
+                    f"HD95 (vox) : {hd95_value:.2f}\n"
                 )
 
 
 if __name__ == "__main__":
-    run()
+    main()

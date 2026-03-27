@@ -1,4 +1,6 @@
 venv
+build
+dist
 
 checkpoints
 data
@@ -6,5 +8,6 @@ kits19
 experiments
 
 KidneyCancerDetection.egg-info
+*.egg-info
 
 **/__pycache__/*

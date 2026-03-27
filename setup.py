@@ -1,7 +1,12 @@
-from setuptools import setup, find_packages
+"""Compatibility entry point for setuptools-based builds.
 
-setup(
-    name="KidneyCancerDetection",
-    version="0.1",
-    packages=find_packages(),
-)
+The package metadata lives in ``pyproject.toml``.
+This file exists so legacy tooling that still expects ``setup.py`` continues
+to work cleanly for the repository.
+"""
+
+from setuptools import setup
+
+
+if __name__ == "__main__":
+    setup()

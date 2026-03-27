@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kidneycancer"
+version = "0.1.0"
+description = "Kidney cancer detection and radiogenomics pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Chinmay Bansal", email = "chinmay8521@gmail.com" }
+]
+keywords = ["medical-imaging", "kidney-cancer", "segmentation", "radiogenomics", "pytorch"]
+dependencies = [
+  "matplotlib",
+  "nibabel",
+  "numpy",
+  "pandas",
+  "pydicom",
+  "pyyaml",
+  "scikit-learn",
+  "scipy",
+  "SimpleITK",
+  "timm",
+  "torch",
+  "torchvision",
+  "tqdm",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChinmayBansal010/KidneyCancer"
+Repository = "https://github.com/ChinmayBansal010/KidneyCancer"
+
+[project.scripts]
+kidneycancer = "kidneycancer.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

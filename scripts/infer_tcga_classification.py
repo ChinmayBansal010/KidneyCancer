@@ -1,86 +1,131 @@
-# scripts/infer_tcga_classification.py
+"""Run MIL classification inference on TCGA 2.5D slices."""
 
-import torch
-import numpy as np
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
-import pandas as pd
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-import matplotlib.pyplot as plt
-from src.models.mil_model import MILNet
 
-MODEL_PATH = "experiments/mil_b0_best.pth"
-DATA_ROOT = Path("data/tcga_2p5d")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+from _bootstrap import bootstrap_src_path
 
-model = MILNet(num_classes=3, ssl_path=None).to(device)
-model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-model.eval()
+bootstrap_src_path()
 
-results = []
+from kidneycancer.utils.logging_utils import configure_logging
 
-for cancer_dir in DATA_ROOT.iterdir():
-    for case in cancer_dir.iterdir():
 
-        slices = np.load(case / "slices.npy")
-        slices = torch.tensor(slices, dtype=torch.float32)
+CLASS_TO_INDEX = {"KIRC": 0, "KIRP": 1, "KICH": 2}
 
-        mean = slices.mean()
-        std = slices.std()
-        if std < 1e-6:
-            std = 1.0
 
-        slices = (slices - mean) / std
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for TCGA MIL inference."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-path", type=Path, default=Path("experiments/mil_b0_best.pth"))
+    parser.add_argument("--data-root", type=Path, default=Path("data/tcga_2p5d"))
+    parser.add_argument("--predictions-path", type=Path, default=Path("experiments/mil_predictions.csv"))
+    parser.add_argument("--confusion-matrix-path", type=Path, default=Path("experiments/confusion_matrix.png"))
+    parser.add_argument("--no-show", action="store_true", help="Do not open the confusion matrix plot window.")
+    return parser.parse_args(argv)
 
-        slices = torch.nn.functional.interpolate(
-            slices.unsqueeze(0),
-            size=(128,128),
-            mode="bilinear",
-            align_corners=False
-        ).squeeze(0)
 
-        slices = slices.to(device)
+def main(argv: list[str] | None = None) -> int:
+    """Predict TCGA classes, save probabilities, and export a confusion matrix."""
+    args = parse_args(argv)
+    logger = configure_logging("kidneycancer.infer_tcga_classification")
 
-        with torch.no_grad():
-            logits, _, _ = model(slices)
-            probs = torch.softmax(logits, dim=0).cpu().numpy()
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        import torch
+        import torch.nn.functional as F
+        from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
 
-        pred = np.argmax(probs)
+        from kidneycancer.models.mil_model import MILNet
 
-        true_label = {"KIRC":0, "KIRP":1, "KICH":2}[cancer_dir.name]
+        def load_case_tensor(case_dir: Path) -> torch.Tensor:
+            slices = torch.tensor(np.load(case_dir / "slices.npy"), dtype=torch.float32)
+            mean = slices.mean()
+            std = slices.std()
+            if std < 1e-6:
+                std = torch.tensor(1.0, dtype=slices.dtype)
+            slices = (slices - mean) / std
+            return F.interpolate(
+                slices.unsqueeze(0),
+                size=(128, 128),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
 
-        results.append([
-            case.name,
-            true_label,
-            pred,
-            probs[0],
-            probs[1],
-            probs[2]
-        ])
+        if not args.model_path.exists():
+            raise FileNotFoundError(f"Model checkpoint does not exist: {args.model_path}")
+        if not args.data_root.exists():
+            raise FileNotFoundError(f"Data root does not exist: {args.data_root}")
 
-df = pd.DataFrame(results, columns=[
-    "case_id",
-    "true_class",
-    "predicted_class",
-    "prob_KIRC",
-    "prob_KIRP",
-    "prob_KICH"
-])
+        args.predictions_path.parent.mkdir(parents=True, exist_ok=True)
+        args.confusion_matrix_path.parent.mkdir(parents=True, exist_ok=True)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-df.to_csv("experiments/mil_predictions.csv", index=False)
+        model = MILNet(num_classes=3, ssl_path=None).to(device)
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        model.eval()
 
-y_true = df["true_class"].values
-y_pred = df["predicted_class"].values
+        rows: list[list[float | int | str]] = []
+        for cancer_dir in sorted(args.data_root.iterdir()):
+            if cancer_dir.name not in CLASS_TO_INDEX:
+                continue
 
-cm = confusion_matrix(y_true, y_pred)
+            for case_dir in sorted(cancer_dir.iterdir()):
+                slices = load_case_tensor(case_dir).to(device)
+                with torch.no_grad():
+                    logits, _, _ = model(slices)
+                    probabilities = torch.softmax(logits, dim=0).cpu().numpy()
 
-disp = ConfusionMatrixDisplay(
-    confusion_matrix=cm,
-    display_labels=["KIRC", "KIRP", "KICH"]
-)
+                rows.append(
+                    [
+                        case_dir.name,
+                        CLASS_TO_INDEX[cancer_dir.name],
+                        int(np.argmax(probabilities)),
+                        float(probabilities[0]),
+                        float(probabilities[1]),
+                        float(probabilities[2]),
+                    ]
+                )
 
-disp.plot(cmap="Blues")
-plt.title("Confusion Matrix - MIL Classification")
-plt.savefig("experiments/confusion_matrix.png")
-plt.show()
+        predictions = pd.DataFrame(
+            rows,
+            columns=[
+                "case_id",
+                "true_class",
+                "predicted_class",
+                "prob_KIRC",
+                "prob_KIRP",
+                "prob_KICH",
+            ],
+        )
+        predictions.to_csv(args.predictions_path, index=False)
 
-print("Inference complete.")
+        matrix = confusion_matrix(
+            predictions["true_class"].values,
+            predictions["predicted_class"].values,
+        )
+        display = ConfusionMatrixDisplay(
+            confusion_matrix=matrix,
+            display_labels=["KIRC", "KIRP", "KICH"],
+        )
+        display.plot(cmap="Blues")
+        plt.title("Confusion Matrix - MIL Classification")
+        plt.savefig(args.confusion_matrix_path)
+        if not args.no_show:
+            plt.show()
+        plt.close()
+
+        logger.info("Saved predictions to %s", args.predictions_path)
+        logger.info("Saved confusion matrix to %s", args.confusion_matrix_path)
+        logger.info("Inference complete")
+    except Exception:
+        logger.exception("TCGA classification inference failed")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

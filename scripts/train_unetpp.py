@@ -1,189 +1,228 @@
-import torch
-import numpy as np
+"""Train a 3D UNet++ segmentation model."""
+
+import argparse
 from pathlib import Path
+
+import numpy as np
+import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.models.unetpp_3d import UNetPP3D
-from src.losses.segmentation_loss import SegmentationLoss
-from src.utils.logger import Logger
-from src.datasets.tumor_segmentation_dataset import TumorSegmentationDataset
-from src.metrics import dice_score, iou_score, hd95, asd
-from src.metrics.utils import to_numpy
+from _bootstrap import bootstrap_src_path
+
+bootstrap_src_path()
+
+from kidneycancer.datasets.tumor_segmentation_dataset import TumorSegmentationDataset
+from kidneycancer.losses.segmentation_loss import SegmentationLoss
+from kidneycancer.metrics import asd, dice_score, hd95, iou_score
+from kidneycancer.metrics.utils import to_numpy
+from kidneycancer.models.unetpp_3d import UNetPP3D
+from kidneycancer.utils.logger import Logger
+from kidneycancer.utils.logging_utils import configure_logging
 
 
-def train_one_epoch(model, loader, loss_fn, opt, scaler, device):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for UNet++ training."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-root", type=Path, default=Path("data/tumor_roi/kits19"))
+    parser.add_argument("--experiment-root", type=Path, default=Path("experiments/seg_unetpp"))
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--samples-per-case", type=int, default=4)
+    parser.add_argument("--jitter-radius", type=int, default=12)
+    parser.add_argument("--patch-size", type=int, nargs=3, default=(96, 96, 96))
+    return parser.parse_args(argv)
+
+
+def aggregate_stats(stats: list[dict[str, float]]) -> dict[str, float]:
+    """Average per-batch metric dictionaries into one summary."""
+    return {key: float(np.mean([entry[key] for entry in stats])) for key in stats[0]}
+
+
+def train_one_epoch(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    loss_fn: SegmentationLoss,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    device: str,
+) -> dict[str, float]:
+    """Run one training epoch and collect aggregated loss values."""
     model.train()
-    stats = []
+    stats: list[dict[str, float]] = []
 
-    for x, y in tqdm(loader, leave=False):
-        x, y = x.to(device), y.to(device)
-
-        opt.zero_grad(set_to_none=True)
+    for inputs, targets in tqdm(loader, leave=False):
+        inputs = inputs.to(device)
+        targets = targets.to(device)
+        optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", enabled=(device == "cuda")):
-            logits = model(x)
-            loss, logs = loss_fn(logits, y, compute_boundary=True)
+            logits = model(inputs)
+            loss, logs = loss_fn(logits, targets, compute_boundary=True)
 
         scaler.scale(loss).backward()
-        scaler.step(opt)
+        scaler.step(optimizer)
         scaler.update()
-
         stats.append(logs)
 
     return aggregate_stats(stats)
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device):
-    import gc
-
+def validate(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    loss_fn: SegmentationLoss,
+    device: str,
+) -> dict[str, float]:
+    """Evaluate the model on the validation split."""
     model.eval()
-    stats = []
-    dice_list, iou_list, hd_list, asd_list = [], [], [], []
+    stats: list[dict[str, float]] = []
+    dice_values: list[float] = []
+    iou_values: list[float] = []
+    hd95_values: list[float] = []
+    asd_values: list[float] = []
 
-    for x, y in tqdm(loader, leave=False):
-        x, y = x.to(device), y.to(device)
+    for inputs, targets in tqdm(loader, leave=False):
+        inputs = inputs.to(device)
+        targets = targets.to(device)
 
-        logits = model(x)
-        loss, logs = loss_fn(logits, y, compute_boundary=False)
+        logits = model(inputs)
+        _, logs = loss_fn(logits, targets, compute_boundary=False)
+        predictions = torch.argmax(logits, dim=1)
 
-        pred = torch.argmax(logits, dim=1)
+        dice_values.append(dice_score(predictions, targets).item())
+        iou_values.append(iou_score(predictions, targets).item())
 
-        dice_list.append(dice_score(pred, y).item())
-        iou_list.append(iou_score(pred, y).item())
-
-        pred_np = to_numpy(pred[0])
-        gt_np = to_numpy(y[0])
-
+        pred_np = to_numpy(predictions[0])
+        target_np = to_numpy(targets[0])
         pred_tumor = pred_np == 2
-        gt_tumor = gt_np == 2
+        target_tumor = target_np == 2
 
-        if pred_tumor.sum() == 0 or gt_tumor.sum() == 0:
-            hd_list.append(np.nan)
-            asd_list.append(np.nan)
+        if pred_tumor.sum() == 0 or target_tumor.sum() == 0:
+            hd95_values.append(np.nan)
+            asd_values.append(np.nan)
         else:
-            hd_list.append(hd95(pred_tumor, gt_tumor))
-            asd_list.append(asd(pred_tumor, gt_tumor))
+            hd95_values.append(hd95(pred_tumor, target_tumor))
+            asd_values.append(asd(pred_tumor, target_tumor))
 
         stats.append(logs)
 
-        del pred, logits, x, y, pred_np, gt_np
-        gc.collect()
-
-    agg = aggregate_stats(stats)
-    agg["dice"] = float(np.mean(dice_list))
-    agg["iou"] = float(np.mean(iou_list))
-    agg["hd95"] = float(np.nanmean(hd_list))
-    agg["asd"] = float(np.nanmean(asd_list))
-    return agg
+    aggregated = aggregate_stats(stats)
+    aggregated["dice"] = float(np.mean(dice_values))
+    aggregated["iou"] = float(np.mean(iou_values))
+    aggregated["hd95"] = float(np.nanmean(hd95_values))
+    aggregated["asd"] = float(np.nanmean(asd_values))
+    return aggregated
 
 
-def aggregate_stats(stats):
-    out = {}
-    for k in stats[0]:
-        out[k] = float(np.mean([s[k] for s in stats]))
-    return out
+def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
+    """Create training and validation dataloaders for UNet++ experiments."""
+    if not args.data_root.exists():
+        raise FileNotFoundError(f"Data root does not exist: {args.data_root}")
+
+    patch_size = tuple(args.patch_size)
+    train_dataset = TumorSegmentationDataset(
+        root_dir=str(args.data_root),
+        mode="train",
+        patch_size=patch_size,
+        samples_per_case=args.samples_per_case,
+        jitter_radius=args.jitter_radius,
+    )
+    val_dataset = TumorSegmentationDataset(
+        root_dir=str(args.data_root),
+        mode="val",
+        patch_size=patch_size,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=args.num_workers > 0,
+    )
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0)
+    return train_loader, val_loader
 
 
-# -------------------------
-# Main
-# -------------------------
-def train():
+def main(argv: list[str] | None = None) -> int:
+    """Train the UNet++ model and save checkpoints and metrics."""
+    args = parse_args(argv)
     torch.manual_seed(42)
     np.random.seed(42)
     torch.backends.cudnn.benchmark = True
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
-    # -------------------------
-    # Directories
-    # -------------------------
-    exp_root = Path("experiments/seg_unetpp")
-    (exp_root / "checkpoints").mkdir(parents=True, exist_ok=True)
-    (exp_root / "logs").mkdir(parents=True, exist_ok=True)
-
-    # -------------------------
-    # Datasets
-    # -------------------------
-    train_ds = TumorSegmentationDataset(
-        root_dir="data/tumor_roi/kits19",
-        mode="train",
-        patch_size=(96, 96, 96),
-        samples_per_case=4,
-        jitter_radius=12,
+    checkpoint_dir = args.experiment_root / "checkpoints"
+    log_dir = args.experiment_root / "logs"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    run_logger = configure_logging(
+        "kidneycancer.train_unetpp",
+        log_file=log_dir / "train.log",
     )
+    csv_logger = Logger(log_dir / "train_log.csv")
 
-    val_ds = TumorSegmentationDataset(
-        root_dir="data/tumor_roi/kits19", mode="val", patch_size=(96, 96, 96)
-    )
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        run_logger.info("Using device: %s", device)
+        run_logger.info("Training data root: %s", args.data_root)
+        run_logger.info("Experiment root: %s", args.experiment_root)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=2,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
-    )
+        train_loader, val_loader = build_dataloaders(args)
+        model = UNetPP3D(in_channels=1, num_classes=3, base_ch=16).to(device)
+        loss_fn = SegmentationLoss(num_classes=3, use_boundary=True, w_boundary=0.5)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        scaler = torch.amp.GradScaler("cuda", enabled=(device == "cuda"))
 
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=0)
-
-    # -------------------------
-    # Model / Loss / Optim
-    # -------------------------
-    model = UNetPP3D(in_channels=1, num_classes=3, base_ch=16).to(device)
-
-    loss_fn = SegmentationLoss(num_classes=3, use_boundary=True, w_boundary=0.5)
-
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scaler = torch.amp.GradScaler("cuda", enabled=(device == "cuda"))
-
-    log_file = exp_root / "logs" / "train_log.csv"
-    logger = Logger(log_file)
-
-    best_dice = 0.0
-
-    # -------------------------
-    # Training loop
-    # -------------------------
-    for epoch in range(1, 101):
-        print(f"\nEpoch {epoch}/100")
-
-        train_stats = train_one_epoch(model, train_loader, loss_fn, opt, scaler, device)
-
-        val_stats = validate(model, val_loader, loss_fn, device)
-
-        row = {
-            "epoch": epoch,
-            "train_loss": train_stats["total"],
-            "val_loss": val_stats["total"],
-            "train_dice_loss": train_stats["dice"],
-            "train_boundary_loss": train_stats["boundary"],
-            "val_dice": val_stats["dice"],
-            "val_iou": val_stats["iou"],
-            "val_hd95": val_stats["hd95"],
-            "val_asd": val_stats["asd"],
-        }
-
-        logger.log(row)
-        print("Logged:", row)
-
-        # Save best model
-        if val_stats["dice"] > best_dice:
-            best_dice = val_stats["dice"]
-            torch.save(model.state_dict(), exp_root / "checkpoints/best_model.pth")
-            print(f"✓ Saved best model (Dice={best_dice:.4f})")
-
-        # Periodic checkpoint
-        if epoch % 10 == 0:
-            torch.save(
-                model.state_dict(), exp_root / f"checkpoints/epoch_{epoch:03d}.pth"
+        best_dice = 0.0
+        for epoch in range(1, args.epochs + 1):
+            run_logger.info("Epoch %s/%s started", epoch, args.epochs)
+            train_stats = train_one_epoch(
+                model,
+                train_loader,
+                loss_fn,
+                optimizer,
+                scaler,
+                device,
             )
+            val_stats = validate(model, val_loader, loss_fn, device)
 
-    logger.close()
+            row = {
+                "epoch": epoch,
+                "train_loss": train_stats["total"],
+                "val_loss": val_stats["total"],
+                "train_dice_loss": train_stats["dice"],
+                "train_boundary_loss": train_stats["boundary"],
+                "val_dice": val_stats["dice"],
+                "val_iou": val_stats["iou"],
+                "val_hd95": val_stats["hd95"],
+                "val_asd": val_stats["asd"],
+            }
+            csv_logger.log(row)
+            run_logger.info("Metrics: %s", row)
+
+            if val_stats["dice"] > best_dice:
+                best_dice = val_stats["dice"]
+                checkpoint_path = checkpoint_dir / "best_model.pth"
+                torch.save(model.state_dict(), checkpoint_path)
+                run_logger.info("Saved best model to %s with Dice %.4f", checkpoint_path, best_dice)
+
+            if epoch % 10 == 0:
+                checkpoint_path = checkpoint_dir / f"epoch_{epoch:03d}.pth"
+                torch.save(model.state_dict(), checkpoint_path)
+                run_logger.info("Saved periodic checkpoint to %s", checkpoint_path)
+    except Exception:
+        run_logger.exception("UNet++ training failed")
+        csv_logger.close()
+        return 1
+
+    csv_logger.close()
+    return 0
 
 
 if __name__ == "__main__":
-    train()
+    raise SystemExit(main())
