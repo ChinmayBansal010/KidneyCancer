@@ -1,5 +1,7 @@
 # KidneyCancerDetection
 
+<a href="https://doi.org/10.5281/zenodo.19254300"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.19254300.svg" alt="DOI"></a>
+
 KidneyCancerDetection is a Python project for kidney tumor preprocessing, localization, segmentation, and TCGA-based classification experiments.
 
 The repository now uses a professional `src/` package layout, exposes a package CLI, and keeps experiment-oriented scripts in `scripts/`.
